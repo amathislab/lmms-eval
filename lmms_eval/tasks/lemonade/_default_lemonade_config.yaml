@@ -1,0 +1,9 @@
+lemonade:
+  repo_id: amathislab/LEMONADE
+  repo_type: dataset
+  file_names:
+    - videos_batch_0.zip
+    - videos_batch_1.zip
+    - videos_batch_2.zip
+    - videos_batch_3.zip
+    - videos_batch_4.zip

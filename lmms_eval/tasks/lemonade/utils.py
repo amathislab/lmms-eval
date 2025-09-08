@@ -1,23 +1,22 @@
 import ast
 import os
+import zipfile
+from collections import defaultdict
+from typing import Any, Optional
+
 import cv2
 import numpy as np
 import yaml
-import zipfile
-from collections import defaultdict
-from PIL import Image
-from typing import Any, Optional
 from huggingface_hub import hf_hub_download
+from PIL import Image
+
+from lmms_eval.tasks.lemonade.file_utils import load_default_config
 
 MAX_NUM_FRAMES = 8
-LEMONADE_ZIP_NAMES = [
-    "videos_batch_0.zip",
-    "videos_batch_1.zip",
-    "videos_batch_2.zip",
-    "videos_batch_3.zip",
-    "videos_batch_4.zip",
-]
 DEFAULT_DATA_DIR = "./data/lemonade"
+
+config = load_default_config()
+
 
 def download_and_extract_lemonade_videos(data_dir: str) -> None:
     """
@@ -33,19 +32,15 @@ def download_and_extract_lemonade_videos(data_dir: str) -> None:
     videos_dir = os.path.join(data_dir, "videos")
     os.makedirs(videos_dir, exist_ok=True)
 
-    for zip_name in LEMONADE_ZIP_NAMES:
+    for zip_name in config["lemonade"]["file_names"]:
         print(f"Downloading {zip_name} from Hugging Face...")
-        zip_path = hf_hub_download(
-            repo_id="amathislab/LEMONADE",
-            filename=zip_name,
-            repo_type="dataset",
-            cache_dir=os.path.join(data_dir, "cache") 
-        )
+        zip_path = hf_hub_download(repo_id=config["lemonade"]["repo_id"], filename=zip_name, repo_type=config["lemonade"]["repo_type"], cache_dir=os.path.join(data_dir, "cache"))
 
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(videos_dir)
-    
+
     print("All videos downloaded and extracted successfully.\n")
+
 
 def load_video(video_file: str, start_frame: int, end_frame: int, max_num_frames: int = MAX_NUM_FRAMES) -> list[Image.Image]:
     """
@@ -59,12 +54,22 @@ def load_video(video_file: str, start_frame: int, end_frame: int, max_num_frames
     """
 
     cap = cv2.VideoCapture(video_file)
-    try: 
+    try:
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Cannot open video: {video_file}")
+
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            return []
+
         start_frame = max(0, start_frame)
         end_frame = min(end_frame, total_frames - 1)
+        if end_frame < start_frame:
+            raise ValueError(f"Invalid frame range: start={start_frame}, end={end_frame}")
         total_valid_frames = end_frame - start_frame + 1
         num_frames = min(max_num_frames, total_valid_frames)
+        if num_frames <= 0:
+            return []
         step = total_valid_frames / num_frames
         frame_indices = [int(start_frame + i * step) for i in range(num_frames)]
         frames = []
@@ -81,11 +86,12 @@ def load_video(video_file: str, start_frame: int, end_frame: int, max_num_frames
     finally:
         cap.release()
 
+
 def parse_options(options: list[str]) -> str:
     """
     Format a list of multiple-choice options into a string.
-    The function assigns letters to each option and returns them in a newline-separated string.    
-    
+    The function assigns letters to each option and returns them in a newline-separated string.
+
     Args:
         options (list[str]): A list of option strings.
 
@@ -125,12 +131,9 @@ def lemonade_doc_to_visual(doc: dict[str, Any]) -> list[Image.Image]:
         end = int(doc["End"])
         frames = load_video(video_path, start, end, max_num_frames=MAX_NUM_FRAMES)
     else:
-        raise FileNotFoundError(
-            f"Video file not found: {video_path}. "
-            f"Expected video for clip '{doc['Clip']}' at {video_path}"
-        )
+        raise FileNotFoundError(f"Video file not found: {video_path}. " f"Expected video for clip '{doc['Clip']}' at {video_path}")
     return frames
-    
+
 
 def lemonade_doc_to_text(doc: dict[str, Any], lmms_eval_specific_kwargs: Optional[dict[str, Any]] = None) -> str:
     """
@@ -144,10 +147,10 @@ def lemonade_doc_to_text(doc: dict[str, Any], lmms_eval_specific_kwargs: Optiona
 
     if lmms_eval_specific_kwargs is None:
         lmms_eval_specific_kwargs = {}
-        
+
     pre_prompt = lmms_eval_specific_kwargs.get("pre_prompt", "")
     post_prompt = lmms_eval_specific_kwargs.get("post_prompt", "")
-    
+
     question = "Question: " + doc["Question"]
     parsed_options = parse_options(ast.literal_eval(doc["Answers"]))
     choices = "Choices:\n" + parsed_options
@@ -158,18 +161,18 @@ def lemonade_doc_to_text(doc: dict[str, Any], lmms_eval_specific_kwargs: Optiona
 def get_multi_choice_info(options: list[str]) -> tuple[dict[str, str], list[str]]:
     """
     Map a list of options to letter labels (A, B, C, ...).
-    
+
     Args:
         options: The set of answer options
     Returns:
-        tuple[dict[str, str], list[str]]: 
+        tuple[dict[str, str], list[str]]:
             - index2ans: Mapping from letters to option text.
             - all_choices: List of the assigned letters.
     """
-    
+
     if not isinstance(options, list):
         raise TypeError(f"Expected list of options, got {type(options)}: {options}")
-   
+
     start_chr = "A"
     all_choices = []
     index2ans = {}
@@ -182,7 +185,7 @@ def get_multi_choice_info(options: list[str]) -> tuple[dict[str, str], list[str]
 
 def parse_multi_choice_response(response: str, all_choices: list[str], index2ans: dict[str, str]) -> str:
     """
-    Parse a model response and return the predicted choice label (e.g., "A", "B", "C", "D"). 
+    Parse a model response and return the predicted choice label (e.g., "A", "B", "C", "D").
 
     Args:
         response (str): The generated response to parse.
@@ -200,7 +203,7 @@ def parse_multi_choice_response(response: str, all_choices: list[str], index2ans
 
     for char in [",", ".", "!", "?", ";", ":", "'"]:
         response = response.strip(char)
-    response = " " + response + " " 
+    response = " " + response + " "
 
     index_ans = True
     ans_with_brack = False
@@ -212,7 +215,7 @@ def parse_multi_choice_response(response: str, all_choices: list[str], index2ans
         if f"{choice}." in response:
             candidates.append(choice)
             ans_with_period = True
-    for choice in all_choices: 
+    for choice in all_choices:
         if f"{choice}:" in response:
             candidates.append(choice)
             ans_with_colon = True
@@ -222,14 +225,14 @@ def parse_multi_choice_response(response: str, all_choices: list[str], index2ans
                 candidates.append(choice)
                 ans_with_brack = True
     if len(candidates) == 0:
-        for choice in all_choices: 
+        for choice in all_choices:
             if f"{choice} " in response:
                 candidates.append(choice)
     if len(candidates) == 0 and len(response.split()) > 5:
         for index, ans in index2ans.items():
             if ans.lower() in response.lower():
                 candidates.append(index)
-                index_ans = False 
+                index_ans = False
     if len(candidates) == 0:
         pred_index = "A"
 
@@ -266,40 +269,33 @@ def parse_multi_choice_response(response: str, all_choices: list[str], index2ans
 def lemonade_process_results(doc: dict[str, Any], results: list[Any]) -> dict[str, dict]:
     """
     Process the results from the model and compute accuracy.
-    
+
     Args:
         doc: A dictionary representing an entry in the dataset.
         results: List of model outputs.
     Returns:
-        A dictionary containing accuracy information. 
+        A dictionary containing accuracy information.
     """
-    
+
     pred = results[0]
     index2ans, all_choices = get_multi_choice_info(ast.literal_eval(doc["Answers"]))
     parsed_pred = parse_multi_choice_response(pred, all_choices, index2ans)
 
-    acc = {
-        "QID": doc["QID"],
-        "category": doc["Category"],
-        "subcategory": doc["Subcategory"],
-        "difficulty": doc["Difficulty"],
-        "answer": doc["Correct Answer"],
-        "parsed_pred": parsed_pred,
-        "original_pred": pred
-    }    
+    acc = {"QID": doc["QID"], "category": doc["Category"], "subcategory": doc["Subcategory"], "difficulty": doc["Difficulty"], "answer": doc["Correct Answer"], "parsed_pred": parsed_pred, "original_pred": pred}
     return {"acc": acc}
 
 
 def lemonade_aggregate_results(results: list[dict[str, Any]]) -> float:
     """
     Aggregate the results from the evaluation.
-    
+
     Args:
         results: List of dicts containing individual evaluation results.
     Returns:
         overall_acc: Overall accuracy.
 
     """
+
     def compute_accuracy(grouped_results):
         acc_dict = {}
         for key, samples in grouped_results.items():
